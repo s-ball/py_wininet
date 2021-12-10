@@ -3,3 +3,5 @@
 /dist/
 /venv/
 /dist/
+/build/
+/py_wininet.egg-info/

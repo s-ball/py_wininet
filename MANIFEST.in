@@ -1,0 +1,9 @@
+include LICENSE.txt
+include README.md
+exclude *~
+include CHANGES.txt
+prune docs
+prune bin_tree.egg-info
+include _py_wininet/_py_wininet.h
+global-exclude .*
+exclude appveyor.yml

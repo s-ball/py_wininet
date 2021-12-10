@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, Extension
 from pkg_resources import parse_version, get_distribution, ResolutionError
 import os.path
 import re
@@ -35,4 +35,14 @@ with open("README.md") as fd:
 setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
+    ext_modules=[
+        Extension('_py_wininet',
+                  ['_py_wininet/_py_wininet.c', '_py_wininet/stream.c',
+                   '_py_wininet/session.c'],
+                  include_dirs=['_py_wininet'],
+                  libraries=['wininet'],
+                  define_macros=[('UNICODE', None),
+                                 ('_UNICODE', None)],
+                  py_limited_api=True)
+    ]
 )
