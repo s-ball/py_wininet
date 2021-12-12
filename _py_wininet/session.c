@@ -88,6 +88,10 @@ static PyObject* Session_closed(Session_Object* self, void* args) {
     Py_RETURN_TRUE;
 }
 
+static PyObject* Session_handle(Session_Object *self, void* args) {
+    return PyLong_FromVoidPtr(self->handle);
+}
+
 static PyMethodDef Session_methods[] = {
     {"close", (PyCFunction)Session_close, METH_NOARGS, PyDoc_STR("close()\n--\n\n ")},
     {NULL}
@@ -95,6 +99,7 @@ static PyMethodDef Session_methods[] = {
 
 static PyGetSetDef Session_getset[] = {
     {"closed", (PyCFunction)Session_closed},
+    {"handle", (PyCFunction)Session_handle},
     {NULL}
 };
 

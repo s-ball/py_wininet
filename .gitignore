@@ -5,3 +5,4 @@
 /dist/
 /build/
 /py_wininet.egg-info/
+/_py_wininet.pyd
