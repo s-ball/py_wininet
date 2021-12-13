@@ -12,6 +12,8 @@ typedef struct {
 
         const wchar_t* url;
     const char* header;
+    int header_len;
+    const char* header_curr;
     HINTERNET conn_handle;
     HINTERNET request_handle;
     PyObject* error;
@@ -145,7 +147,8 @@ static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
             }
             if (HttpQueryInfoA(self->request_handle, HTTP_QUERY_RAW_HEADERS_CRLF, buff, &length, &index)) {
                 buff[length] = 0;
-                self->header = buff;
+                self->header = self->header_curr = buff;
+                self->header_len = length;
                 cr = 0;
             }
         }
@@ -165,7 +168,29 @@ static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
 }
 
 static PyObject* Stream_readinto(Stream_Object* self, PyObject* b) {
-    Py_RETURN_NONE;
+	char* buffer;
+	Py_ssize_t buffer_len;
+	if (0 != PyObject_AsWriteBuffer(b, &buffer, &buffer_len)) {
+		return NULL;
+	}
+    if (self->header_len > 0) {
+        Py_ssize_t len = buffer_len;
+        if (len > self->header_len) {
+            len = self->header_len;
+        }
+        memcpy(buffer, self->header_curr, len);
+        self->header_curr += len;
+        self->header_len -= (int) len;
+        return PyLong_FromSsize_t(len);
+    }
+    else {
+        DWORD len;
+        if (InternetReadFile(self->request_handle, buffer, (DWORD) buffer_len, &len)) {
+            return PyLong_FromUnsignedLong(len);
+        }
+        PyErr_Format(self->error, "Could not read %d bytes", len);
+    }
+    return NULL;
 }
 
 static PyObject* Stream_close(Stream_Object* self, PyObject* args) {

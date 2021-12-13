@@ -1,11 +1,12 @@
 // A hack to allow execution under Python_d from Visual Studio
-#ifndef NOTLIMITED
+#ifdef NOTLIMITED
 #ifdef _DEBUG
 #undef _DEBUG
 #endif
 #endif
 
 #ifndef _DEBUG
+#pragma message("Limited API")
 #define Py_LIMITED_API 0x03070000
 #endif
 
