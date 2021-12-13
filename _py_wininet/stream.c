@@ -1,162 +1,187 @@
 #include "_py_wininet.h"
 
+#include <Windows.h>
+#include <WinInet.h>
+
 /*
- * Declare a local type duck typing io.RawIOBase
+ * Loads a document using WinInet
  */
 
 typedef struct {
     PyObject_HEAD
 
-        char* data;
-    const char* first;
-    Py_ssize_t first_size;
-    const char* second;
-    Py_ssize_t second_size;
-    int_fast16_t closed;
+        const wchar_t* url;
+    const char* header;
+    HINTERNET conn_handle;
+    HINTERNET request_handle;
+    PyObject* error;
 } Stream_Object;
 
 
 static void Stream_dealloc(Stream_Object* self) {
-    if (self->data) PyMem_Free((char*)self->data);
+    if (self->header) free((char*)self->header);
+    if (self->url) PyMem_Free((LPWSTR) self->url);
+    if (self->request_handle) HttpEndRequest(self->request_handle, NULL, 0, 0);
+    if (self->conn_handle) InternetCloseHandle(self->conn_handle);
+    if (self->error != PyExc_RuntimeError) Py_XDECREF(self->error);
     ((destructor)PyType_GetSlot(Py_TYPE(self), Py_tp_free))((PyObject*)self);
 }
 
-static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
-    char* kwnames[] = { "first", "second", NULL };
-    char* first, * second;
-    if (PyArg_ParseTupleAndKeywords(args, kwargs, "y#|y#", kwnames,
-        &first, &self->first_size, &second, &self->second_size)) {
-        self->data = PyMem_Malloc(self->first_size + self->second_size);
-        if (self->data) {
-            self->first = self->data;
-            self->second = self->first + self->first_size;
-            memcpy(self->data, first, self->first_size);
-            memcpy(self->data + self->first_size, second, self->second_size);
-            return 0;
+LPCWSTR getUnicodeOrNull(PyObject* obj) {
+    if (obj == NULL || obj == Py_None) return NULL;
+    return (PyUnicode_AsWideCharString(obj, NULL));
+}
+
+static LPCWSTR defArr[] = {L"*.*", NULL};
+
+static void freeArray(LPCWSTR* arr) {
+    if (arr != defArr && arr != NULL) {
+        for (LPCWSTR* it = *arr; *it != NULL; ++it) {
+            PyMem_Free((LPWSTR) it);
         }
-        PyErr_Format(PyExc_MemoryError, "cannot allocate");
+        free((LPWSTR) arr);
     }
-    return -1;
+}
+
+static LPCWSTR* getArray(PyObject* obj) {
+    if (Py_None == obj) return defArr;
+    Py_ssize_t sz = PySequence_Size(obj);
+    if (sz == -1) return NULL;
+    PyObject* iter;
+    LPCWSTR* arr = calloc(sz + 1, sizeof(*arr));
+    if (arr == 0) {
+        PyErr_Format(PyExc_MemoryError, "Could not malloc");
+        return NULL;
+    }
+    if (sz == 0) return arr;
+    if (iter = PyObject_GetIter(obj)) {
+        LPCWSTR* it = arr;
+        PyObject* o;
+        while (o = PyIter_Next(iter)) {
+            *it = PyUnicode_AsWideCharString(o, NULL);
+            Py_DECREF(o);
+            if (!*it) break;
+        }
+        Py_DECREF(iter);
+        if (!PyErr_Occurred()) {
+            return arr;
+        }
+    }
+    freeArray(arr);
+    return NULL;
+}
+
+static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
+    int cr = -1;
+    const char* info = NULL;
+    PyObject* tmp = PyImport_AddModule(MOD_NAME);
+    if (tmp) {
+        self->error = PyObject_GetAttrString(tmp, "error");
+    }
+    if (!self->error) self->error = PyExc_RuntimeError;
+    char* kwnames[] = { "handle", "type", "host", "method", "selector",
+        "fullurl", "referer", "accept_types", "headers", "data", "port", NULL};
+    
+    HINTERNET handle;
+    BOOL ok = FALSE;
+    PyObject *hostobj, *methodobj = NULL, *selectorobj, *refererobj = NULL, *accept_typesobj = Py_None;
+    PyObject* headerobj = NULL, *typeobj=NULL, *fullurlobj = NULL;
+    const char* data = NULL;
+    DWORD headerslength = 0;
+    Py_ssize_t datalength = 0;
+    WORD port = 0;
+    DWORD flags;
+    if (PyArg_ParseTupleAndKeywords(args, kwargs, "nUUUU|UUOUz#H", kwnames, &handle,
+        &typeobj, &hostobj, &methodobj, &selectorobj, &fullurlobj, &refererobj, &accept_typesobj,
+        &headerobj, &data, &datalength, &port)) {
+        LPCWSTR host=NULL, method=NULL, selector = NULL, referer = NULL;
+        LPCWSTR* accept_types = NULL;
+        LPCWSTR headers = NULL, type=NULL;
+        if ((host = PyUnicode_AsWideCharString(hostobj, NULL)) &&
+            (type = PyUnicode_AsWideCharString(typeobj, NULL)) &&
+            (selector = PyUnicode_AsWideCharString(selectorobj, NULL)) &&
+            (headers = PyUnicode_AsWideCharString(headerobj, NULL)) &&
+            (self->url = PyUnicode_AsWideCharString(fullurlobj, NULL)) &&
+            (accept_types = getArray(accept_typesobj))) {
+            method = getUnicodeOrNull(methodobj);
+            referer = getUnicodeOrNull(refererobj);
+            if (PyErr_Occurred()) goto end;
+
+            flags = 0 == lstrcmp(L"http", type) ? 0 : INTERNET_FLAG_SECURE;
+            headerslength = lstrlen(headers);
+            info = "InternetConnect";
+            self->conn_handle = InternetConnect(handle, host, port, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+            if (!self->conn_handle) goto end;
+            info = "HttpOpenRequest";
+            self->request_handle = HttpOpenRequest(self->conn_handle, method, selector, NULL, referer, accept_types, flags, (DWORD_PTR)&self->url);
+            if (!self->request_handle) goto end;
+            info = "HttpSendRequest";
+            if (!HttpSendRequest(self->request_handle, headers, headerslength, (LPVOID)data, (DWORD) datalength)) {
+                if (ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED == GetLastError()) {
+                    if (ERROR_SUCCESS != InternetErrorDlg(GetDesktopWindow(),
+                        self->request_handle,
+                        ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED,
+                        FLAGS_ERROR_UI_FILTER_FOR_ERRORS |
+                        FLAGS_ERROR_UI_FLAGS_GENERATE_DATA |
+                        FLAGS_ERROR_UI_FLAGS_CHANGE_OPTIONS,
+                        NULL)) {
+                        info = "InternetErrorDlg";
+                        goto end;
+                    }
+                    if (!HttpSendRequest(self->request_handle, headers, headerslength, (LPVOID)data, (DWORD) datalength)) {
+                        goto end;
+                    }
+                }
+                else goto end;
+            }
+            DWORD length = 0, index = 0;
+            info = "HttpQueryInfo";
+            HttpQueryInfoA(self->request_handle, HTTP_QUERY_RAW_HEADERS_CRLF, &index, &length, &index);
+            char* buff = malloc(length + 1);
+            if (buff == NULL) {
+                info = NULL;
+                PyErr_Format(PyExc_MemoryError, "Could not malloc");
+                goto end;
+            }
+            if (HttpQueryInfoA(self->request_handle, HTTP_QUERY_RAW_HEADERS_CRLF, buff, &length, &index)) {
+                buff[length] = 0;
+                self->header = buff;
+                cr = 0;
+            }
+        }
+    end:
+        if (cr != 0) free((char*)self->header);
+        freeArray(accept_types);
+        PyMem_Free((LPWSTR)referer);
+        PyMem_Free((LPWSTR)method);
+        PyMem_Free((LPWSTR)headers);
+        PyMem_Free((LPWSTR)selector);
+        PyMem_Free((LPWSTR)host);
+    }
+    if ((cr != 0) && !PyErr_Occurred()) {
+        PyErr_Format(self->error, "WinInet error in %s: %x", info, GetLastError());
+    }
+    return cr;
 }
 
 static PyObject* Stream_readinto(Stream_Object* self, PyObject* b) {
-    if (self->closed) {
-        PyErr_Format(PyExc_ValueError, "I/O operation on closed file.");
-        return NULL;
-    }
-    char* buf;
-    Py_ssize_t len;
-#pragma warning(suppress : 4996)
-    if (0 != PyObject_AsWriteBuffer(b, &buf, &len)) return NULL;
-    Py_ssize_t* sz;
-    const char** data;
-    if (self->first_size > 0) {
-        sz = &self->first_size;
-        data = &self->first;
-    }
-    else {
-        sz = &self->second_size;
-        data = &self->second;
-    }
-    Py_ssize_t l = (len < *sz) ? len : *sz;
-    memcpy(buf, *data, l);
-    *data += l;
-    *sz -= l;
-    return PyLong_FromSsize_t(l);
-}
-
-static PyObject* Stream_readall(Stream_Object* self, PyObject* b) {
-    if (self->closed) {
-        PyErr_Format(PyExc_ValueError, "I/O operation on closed file.");
-        return NULL;
-    }
-    PyObject* arr = PyByteArray_FromStringAndSize("", 0);
-    PyObject* tot = PyBytes_FromString("");
-    PyObject* got;
-    int cr = PyByteArray_Resize(arr, 8192);
-    for (;;) {
-        got = Stream_readinto(self, arr);
-        if (!got) break;
-        cr = PyLong_AsLong(got);
-        Py_DECREF(got);
-        if (cr == 0) {
-            break;
-        }
-        PyBytes_ConcatAndDel(&tot, PyBytes_FromStringAndSize(PyByteArray_AsString(arr), cr));
-        if (!tot) break;
-    }
-    Py_DECREF(arr);
-    if (!got) {
-        Py_DECREF(tot);
-        return NULL;
-    }
-    return tot;
-}
-
-static PyObject* Stream_read(Stream_Object* self, PyObject* args, PyObject* kwargs) {
-    Py_ssize_t size = -1;
-    char* kwnames[] = { "size", NULL };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|n", kwnames, &size)) {
-        return NULL;
-    }
-    if (size == -1) {
-        return Stream_readall(self, NULL);
-    }
-    PyObject* arr = PyByteArray_FromStringAndSize("", 0);
-    if (arr) {
-        int cr = PyByteArray_Resize(arr, size);
-        PyObject* len = Stream_readinto(self, arr);
-        if (!len) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-        size = PyLong_AsSsize_t(len);
-        Py_DECREF(len);
-    }
-    PyObject* tot = PyBytes_FromStringAndSize(PyByteArray_AsString(arr), size);
-    Py_DECREF(arr);
-    return tot;
-}
-
-static PyObject* Stream_makefile(PyObject* self, PyObject* args, PyObject* kwargs) {
-    PyObject* brd = NULL;
-    PyObject* io = PyImport_AddModule("io");
-    if (io) {
-        PyObject* BufferedReader = PyObject_GetAttrString(io, "BufferedReader");
-        if (BufferedReader) {
-            PyObject* args = Py_BuildValue("(O)", self);
-            if (args) {
-                brd = PyObject_Call(BufferedReader, args, NULL);
-                Py_DECREF(args);
-            }
-            Py_DECREF(BufferedReader);
-        }
-    }
-    return brd;
+    Py_RETURN_NONE;
 }
 
 static PyObject* Stream_close(Stream_Object* self, PyObject* args) {
-    self->closed = 1;
+    DWORD err = 0;
+    BOOL cr = HttpEndRequest(self->request_handle, NULL, 0, 0);
+    if (!cr) err = GetLastError();
+    cr = InternetCloseHandle(self->conn_handle);
+    if (!err && !cr) err = GetLastError();
     Py_RETURN_NONE;
 }
 
 static PyObject* Stream_closed(Stream_Object* self, void* args) {
-    if (self->closed) {
+    if (self->request_handle) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
-}
-
-static PyObject* meth_true(PyObject* self, PyObject* args) {
-    Py_RETURN_TRUE;
-}
-
-static PyObject* meth_false(PyObject* self, PyObject* args) {
-    Py_RETURN_FALSE;
-}
-
-static PyObject* meth_none(PyObject* self, PyObject* args) {
-    Py_RETURN_NONE;
 }
 
 PyDoc_STRVAR(readinto_doc, "readinto(b)\n--\n\n"
@@ -165,15 +190,7 @@ PyDoc_STRVAR(readinto_doc, "readinto(b)\n--\n\n"
 
 static PyMethodDef Stream_methods[] = {
     {"readinto", (PyCFunction)Stream_readinto, METH_O, readinto_doc},
-    {"readable", meth_true, METH_NOARGS, PyDoc_STR("readable()\n--\n\n ")},
-    {"writable", meth_false, METH_NOARGS, PyDoc_STR("writable()\n--\n\n ")},
-    {"seekable", meth_false, METH_NOARGS, PyDoc_STR("seekable()\n--\n\n ")},
-    {"isatty", meth_false, METH_NOARGS, PyDoc_STR("isatty()\n--\n\n ")},
-    {"flush", meth_none, METH_NOARGS, PyDoc_STR("flush()\n--\n\n ")},
     {"close", (PyCFunction)Stream_close, METH_NOARGS, PyDoc_STR("close()\n--\n\n ")},
-    {"makefile", (PyCFunction)Stream_makefile, METH_VARARGS | METH_KEYWORDS, NULL},
-    {"readall", (PyCFunction)Stream_readall, METH_NOARGS, PyDoc_STR("readall()\n--\n\n ")},
-    {"read", (PyCFunction)Stream_read, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("read(size=-1)\n--\n\n ")},
     {NULL}
 };
 
@@ -183,8 +200,9 @@ static PyGetSetDef Stream_getset[] = {
 };
 
 static char Stream_doc[] = PyDoc_STR(
-    "Binary file-like object that provides the content of two byte-like"
-    " objects in sequence.\n\nCannot be sub-classed.");
+    "Reads the content of the response (including status line and headers)"
+    " into the provided writable bytes-like object."
+);
 
 static PyType_Slot Stream_slots[] = {
     {Py_tp_init, Stream_init},
@@ -199,7 +217,7 @@ static PyType_Spec Stream_spec = {
     MOD_NAME ".Stream",
     sizeof(Stream_Object),
     0,
-    Py_TPFLAGS_DEFAULT,
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     Stream_slots
 };
 /*
@@ -214,13 +232,9 @@ int exec_Stream_py_wininet(PyObject* module) {
         if (0 == PyObject_SetAttrString(Stream_Type, "__module__", mod_name)) {
             Py_DECREF(mod_name);
             if (0 == PyModule_AddObject(module, "Stream", Stream_Type)) {
-                PyObject* io = PyImport_ImportModule("io");
-                if (io) {
-                    if (0 == PyModule_AddObject(module, "io", io)) {
-                        return 0; /* success */
-                    }
-                    Py_DECREF(io);
-                }
+                return 0;
+            }
+            else {
                 Py_INCREF(Stream_Type);
             }
         }
