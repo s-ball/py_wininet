@@ -73,6 +73,23 @@ static LPCWSTR* getArray(PyObject* obj) {
     return NULL;
 }
 
+static void InternetStatusCallback(
+    HINTERNET hInternet,
+    DWORD_PTR dwContext,
+    DWORD dwInternetStatus,
+    LPVOID lpvStatusInformation,
+    DWORD dwStatusInformationLength) {
+    if (INTERNET_STATUS_REDIRECT == dwInternetStatus) {
+        wchar_t** url = (wchar_t**)dwContext;
+        wchar_t* tmp = PyMem_Malloc((1 + dwStatusInformationLength) * sizeof(wchar_t));
+        if (tmp) {
+            memcpy(tmp, lpvStatusInformation, dwStatusInformationLength * sizeof(*tmp));
+            tmp[dwStatusInformationLength] = 0;
+            PyMem_Free(*url);
+            *url = tmp;
+        }
+    }
+}
 static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
     int cr = -1;
     const char* info = NULL;
@@ -110,6 +127,9 @@ static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
             if (PyErr_Occurred()) goto end;
 
             flags = 0 == lstrcmp(L"http", type) ? 0 : INTERNET_FLAG_SECURE;
+            if (port == 0) {
+                port = lstrcmp(L"https", type) ? INTERNET_DEFAULT_HTTP_PORT : INTERNET_DEFAULT_HTTPS_PORT;
+            }
             headerslength = lstrlen(headers);
             info = "InternetConnect";
             self->conn_handle = InternetConnect(handle, host, port, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
@@ -117,6 +137,8 @@ static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
             info = "HttpOpenRequest";
             self->request_handle = HttpOpenRequest(self->conn_handle, method, selector, NULL, referer, accept_types, flags, (DWORD_PTR)&self->url);
             if (!self->request_handle) goto end;
+            info = "InternetSetStatusCallback";
+            if (INTERNET_INVALID_STATUS_CALLBACK == InternetSetStatusCallback(self->request_handle, InternetStatusCallback)) goto end;
             info = "HttpSendRequest";
             if (!HttpSendRequest(self->request_handle, headers, headerslength, (LPVOID)data, (DWORD) datalength)) {
                 if (ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED == GetLastError()) {
@@ -136,6 +158,7 @@ static int Stream_init(Stream_Object* self, PyObject* args, PyObject* kwargs) {
                 }
                 else goto end;
             }
+            InternetSetStatusCallback(self->request_handle, NULL);
             DWORD length = 0, index = 0;
             info = "HttpQueryInfo";
             HttpQueryInfoA(self->request_handle, HTTP_QUERY_RAW_HEADERS_CRLF, &index, &length, &index);
@@ -209,6 +232,11 @@ static PyObject* Stream_closed(Stream_Object* self, void* args) {
     Py_RETURN_FALSE;
 }
 
+static PyObject* Stream_url(Stream_Object* self, void* args) {
+    if (!self->url) Py_RETURN_NONE;
+    return PyUnicode_FromWideChar(self->url, -1);
+}
+
 PyDoc_STRVAR(readinto_doc, "readinto(b)\n--\n\n"
     "Read bytes into a pre - allocated, writable bytes - like object b"
     " and return the number of bytes read.");
@@ -221,6 +249,7 @@ static PyMethodDef Stream_methods[] = {
 
 static PyGetSetDef Stream_getset[] = {
     {"closed", (PyCFunction)Stream_closed},
+    {"url", (PyCFunction) Stream_url},
     {NULL}
 };
 

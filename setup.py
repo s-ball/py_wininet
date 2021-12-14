@@ -40,7 +40,7 @@ setup(
                   ['_py_wininet/_py_wininet.c', '_py_wininet/stream.c',
                    '_py_wininet/session.c'],
                   include_dirs=['_py_wininet'],
-                  libraries=['wininet'],
+                  libraries=['wininet', 'user32'],
                   define_macros=[('UNICODE', None),
                                  ('_UNICODE', None)],
                   py_limited_api=True)

@@ -11,7 +11,7 @@ class EchoRequestHandler(BaseHTTPRequestHandler):
             data += b'\r\nData:\r\n'
             data += self.rfile.read(length)
         self.send_response(200)
-        self.send_header('Content-Length', str(length))
+        self.send_header('Content-Length', str(len(data)))
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(data)
