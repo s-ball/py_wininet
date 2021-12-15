@@ -73,7 +73,7 @@ static LPCWSTR* getArray(PyObject* obj) {
     return NULL;
 }
 
-static void InternetStatusCallback(
+static void CALLBACK InternetStatusCallback(
     HINTERNET hInternet,
     DWORD_PTR dwContext,
     DWORD dwInternetStatus,
